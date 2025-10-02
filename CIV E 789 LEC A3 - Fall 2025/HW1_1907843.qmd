@@ -1,0 +1,1446 @@
+---
+title: "Smartphone-Based Sensing of Pendulum Vibrations"
+subtitle: "Assignment 1"
+author: "Jinpeng Zhu - 1907843"
+date: "September 29, 2025"
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    toc-expand: 3
+    number-sections: true
+    code-fold: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    crossref:
+      eq-prefix: Equation
+      tbl-prefix: Table
+      fig-prefix: Figure
+  pdf: 
+    toc: true
+    number-sections: true
+    colorlinks: true
+    latex-engine: xelatex
+    include-in-header: preamble.tex
+    mainfont: "Times New Roman"
+crossref:
+  chapters: true
+execute:
+  echo: false
+  warning: false
+  message: false
+  fig-path: "./Figures/"
+jupyter: python3
+editor: 
+  render-on-save: true
+---
+
+```{python}
+#| label: setup
+#| include: false
+
+import os
+import glob
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy
+from scipy import signal
+from scipy.optimize import curve_fit
+from typing import Tuple, List, Dict
+from IPython.display import display, Markdown
+import matplotlib.ticker as mticker
+
+# Set plot style
+plt.style.use('seaborn-v0_8-paper')
+plt.rcParams['savefig.dpi'] = 300
+plt.rcParams['figure.figsize'] = (9, 4)
+plt.rcParams['legend.loc'] = 'upper right'
+
+# Ensure figures render in notebook
+%matplotlib inline
+
+# Paths
+BASE_DIR = f"."
+DATA_DIR = os.path.join(BASE_DIR, 'Data')
+FIG_DIR = os.path.join(BASE_DIR, 'Figures')
+g = 9.81  # gravitational acceleration
+```
+
+```{python}
+#| label: load-and-process-data
+def load_trial_csv(path: str, start: int = 500, end: int = 8000) -> pd.DataFrame:
+    """Load CSV exported from PhyPhox with acceleration data.
+    
+    Args:
+        path: Path to CSV file
+        start: Starting row index
+        end: Ending row index
+        
+    Returns:
+        DataFrame with selected time range and columns renamed for convenience
+    """
+    # Load data with original column names
+    df = pd.read_csv(path)
+    
+    # Select relevant columns and rename for easier access
+    columns = {
+        'Time (s)': 'time',
+        'Linear Acceleration x (m/s^2)': 'accel_x',
+        'Linear Acceleration y (m/s^2)': 'accel_y',
+        'Linear Acceleration z (m/s^2)': 'accel_z',
+        'Absolute acceleration (m/s^2)': 'accel_abs'
+    }
+    
+    df = df.rename(columns=columns)
+    
+    # Trim to specified range
+    if start is not None and end is not None:
+        df = df.iloc[start:end]
+        
+    # Reset time to start from 0
+    df['time'] = df['time'] - df['time'].iloc[0]
+    
+    return df
+```
+
+```{python}
+#| label: compute-trial-stats
+def compute_trial_stats(data):
+    """Compute statistical measures for a single trial
+    include: mean, variance, RMS, skewness, kurtosis
+    """
+    return {
+        'Mean (µ)': np.mean(data),
+        'Variance (σ²)': np.var(data),
+        'Root Mean Square (RMS)': np.sqrt(np.mean(np.square(data))),
+        'Skewness (γ₁)': scipy.stats.skew(data),
+        'Kurtosis (γ₂)': scipy.stats.kurtosis(data, fisher=False)
+    }
+```
+
+```{python}
+#| label: analyze-trail
+def analyze_trial(data: pd.DataFrame) -> Dict:
+    """Analyze acceleration data from a single trial.
+    
+    Args:
+        data: DataFrame containing trial data with 'time' and 'accel' columns
+        
+    Returns:
+        Dictionary containing analysis results
+    """
+    # Get time and y-direction acceleration data
+    time = data['time'].values
+    acc_y = data['accel_y'].values
+    
+    # Find peaks for amplitude and period calculation
+    peaks, peak_props = signal.find_peaks(acc_y, height=1, prominence=0.5, distance=50)
+    troughs, trough_props = signal.find_peaks(-acc_y, height=1, prominence=0.5, distance=50)
+    
+    # Calculate amplitudes (peak-to-trough)
+    peak_heights = peak_props['peak_heights']
+    trough_heights = -trough_props['peak_heights']
+    amplitudes = np.mean(peak_heights) - np.mean(trough_heights)
+    
+    # Calculate periods
+    peak_periods = np.diff(time[peaks])
+    
+    # Calculate statistics
+    results = {
+        'mean_amplitude': amplitudes/2,  # Convert peak-to-peak to amplitude
+        'std_amplitude': np.std(peak_heights),
+        'mean_period': np.mean(peak_periods),
+        'std_period': np.std(peak_periods),
+        'max_amplitude': np.max(peak_heights),
+        'peaks': peaks,
+        'peak_times': time[peaks],
+        'peak_values': peak_heights
+    }
+    
+    return results
+```
+
+```{python}
+#| label: process-all-trials
+def process_all_trials(part: str, num_trials: int) -> pd.DataFrame:
+    """Process all trials for a given part and return summary statistics.
+    
+    Args:
+        part: Part identifier ('A', 'B', or 'C')
+        num_trials: Number of trials to process
+        
+    Returns:
+        DataFrame with trial statistics
+    """
+    results = []
+    peaks = []
+    for i in range(1, num_trials + 1):
+        file_path = f'Data/part{part}_trial{i:02d}.csv'
+        data = load_trial_csv(file_path)
+        trial_results = analyze_trial(data)
+        
+        results.append({
+            'Trial': i,
+            'Mean Amplitude (m/s²)': trial_results['mean_amplitude'],
+            'Std Amplitude (m/s²)': trial_results['std_amplitude'],
+            'Mean Period (s)': trial_results['mean_period'],
+            'Std Period (s)': trial_results['std_period'],
+            'Max Amplitude (m/s²)': trial_results['max_amplitude']
+        })
+
+        peaks.append({
+            'peaks': trial_results['peaks'],
+            'peak_times': trial_results['peak_times'],
+            'peak_values': trial_results['peak_values']
+        })
+    
+    return pd.DataFrame(results), pd.DataFrame(peaks)
+```
+
+```{python}
+#| label: prepare-data
+#| include: false
+
+# Function to load multiple trials for a part
+def load_part_data(part: str, num_trials: int) -> dict:
+    """Load all trials for a specific part into a dictionary.
+    
+    Args:
+        part: Part identifier ('A', 'B', or 'C')
+        num_trials: Number of trials to load
+        
+    Returns:
+        Dictionary with trial data, keys are trial numbers
+    """
+    data_dict = {}
+    for i in range(1, num_trials + 1):
+        file_path = f'Data/part{part}_trial{i:02d}.csv'
+        data_dict[i] = load_trial_csv(file_path)
+    return data_dict
+
+# Load all experimental data
+data_a = load_part_data('A', 10)  # 10 trials for part A
+data_b = load_part_data('B', 10)  # 10 trials for part B
+data_c = load_part_data('C', 10)  # 14 trials for part C
+
+# Pre-analysis-data
+results_a, peak_a = process_all_trials('A', 10)
+results_b, peak_b = process_all_trials('B', 10)
+results_c, peak_c = process_all_trials('C', 10)
+
+```
+
+# Theoretical Background {#sec-theory}
+
+## Simple Pendulum Model {#sec-simple-pendulum}
+
+For small angular displacements ($\theta \le 15^\circ$), the period of a simple pendulum is given by @eq-period:
+$$
+T_{n}=2\pi\sqrt{\frac{L}{g}} 
+$$ {#eq-period}
+where:
+
+- $T_n$ = oscillation period (seconds)
+- $L$ = pendulum length (meters)
+- $g$ = gravitational acceleration ($9.81 \, \text{m/s}^2$)
+
+The theoretical values ​​of the three experiments are calculated as shown in the following @tbl-theoritical-values:
+
+```{python}
+#| label: tbl-theoritical-values
+#| tbl-cap: Theoretical Parameters for Different Pendulum Configurations
+configurations = {
+    'Part A': {'L': 0.3, 'theta': 15, 'description': 'L = 0.3 m, θ = 15'},
+    'Part B': {'L': 1.0, 'theta': 15, 'description': 'L = 1.0 m, θ = 15'},
+    'Part C': {'L': 0.3, 'theta': 45, 'description': 'L = 0.3 m, θ = 45'}
+}
+
+theory_results = []
+for config_name, params in configurations.items():
+    L = params['L']  # pendulum length in meters
+    theta = np.radians(params['theta'])  # initial angle in radians
+    
+    # Calculate theoretical values
+    T_n = 2 * np.pi * np.sqrt(L/g)  # natural period
+    f_n = 1/T_n  # natural frequency
+    omega_n = 2 * np.pi * f_n  # angular frequency
+    
+    # Maximum acceleration at θ = θ_max (assuming simple harmonic motion)
+    a_max = g * np.sin(theta)  # maximum acceleration
+    
+    # For large angles, use the complete elliptic integral formula
+    k = np.sin(theta/2)
+    T_nonlinear = T_n * (1 + (1/16)*k**2 + (11/3072)*k**4)  # period with angle correction
+    
+    theory_results.append({
+        'Configuration': config_name,
+        # 'Description': params['description'],
+        # 'Length (m)': L,
+        # 'Initial Angle (deg)': params['theta'],
+        'Theoretical Period (s)': T_n,
+        # 'Non-linear Period (s)': T_nonlinear,
+        'Natural Frequency (Hz)': f_n,
+        'Max Acceleration (m/s²)': a_max,
+        'Angular Frequency (rad/s)': omega_n
+    })
+
+# Create and display theoretical results table
+theory_df = pd.DataFrame(theory_results)
+theory_df.style.format({
+    'Length (m)': '{:.2f}',
+    'Initial Angle (deg)': '{:.1f}',
+    'Theoretical Period (s)': '{:.4f}',
+    'Non-linear Period (s)': '{:.4f}',
+    'Natural Frequency (Hz)': '{:.4f}',
+    'Max Acceleration (m/s²)': '{:.4f}',
+    'Angular Frequency (rad/s)': '{:.4f}'
+})
+```
+
+## Damped Oscillation Model {#sec-damped-model}
+
+The amplitude envelope of a damped pendulum follows exponential decay, as shown in @eq-damped-pendulum:
+$$
+A(t)=A_{0} \exp(-\zeta\frac{2\pi}{T_{n}}t)
+$$ {#eq-damped-pendulum}
+
+where:
+
+  * $A(t)$ = amplitude at time t
+  * $A_0$ = initial amplitude
+  * $\zeta$ = damping ratio (dimensionless)
+  * $t$ = elapsed time (seconds)
+
+# Experimental Setup {#sec-setup}
+
+## Equipment and Materials
+
+1. Smartphone:
+    Type: Xiaomi 10
+    Target sensor: Accelerator
+2. String: Knitting wool
+3. Fixing Device: Toilet paper roll
+4. Camera: Another smartphone
+5. Softer & Version: PhyPhox 1.2.0
+6. Cross beam: 1 chopstick
+6. Angle measurement: Compass App of Smartphone
+
+::: {#fig-photo layout-ncol=5}
+
+![Part A & C](./Figures/photo/IMG_20250916_160445.jpg)
+
+![Part B](./Figures/photo/IMG_20250916_112922.jpg)
+
+![Close up](./Figures/photo/IMG_20250916_112936.jpg)
+
+![Overhead View](./Figures/photo/IMG_20250916_112954.jpg)
+
+![Measurements](./Figures/photo/IMG_20250916_163613.jpg)
+
+Real photos of the experiment process
+:::
+
+# Data Analysis
+
+## Part A: Simple Pendulum Analysis {#sec-part-a}
+
+**Data Overview**: The analysis of the simple pendulum motion follows these steps:
+
+1. Load and process acceleration data from multiple trials
+2. Calculate periods using peak detection
+3. Compare experimental results with theoretical predictions
+4. Analyze measurement uncertainties
+
+```{python}
+#| label: fig-overview-a
+#| fig-cap: "Overview of pendulum motion showing y-direction acceleration for multiple trials. The first 15 seconds of data are shown for clarity."
+
+# Plot multiple trials
+# plt.figure(figsize=(9, 4))
+
+# Plot all trials from pre-loaded data
+for i in range(1, 11):
+    data = data_a[i]
+    plt.plot(data['time'], data['accel_y'], 
+             alpha=0.5, label=f'Trial {i}')
+
+plt.xlabel('Time (s)')
+plt.ylabel('Y-Acceleration (m/s²)')
+plt.title('Y-Direction Acceleration for Multiple Trials')
+plt.grid(True)
+plt.legend()
+plt.xlim(0, 15)  # Focus on first 15 seconds
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/overview_a.png')
+plt.show()
+
+```
+```{python}
+# Add text box with average statistics
+stats_text = f"Average Period: {results_a['Mean Period (s)'].mean():.3f} ± {results_a['Std Period (s)'].mean():.3f} s; "
+stats_text += f"Average Amplitude: {results_a['Mean Amplitude (m/s²)'].mean():.3f} ± {results_a['Std Amplitude (m/s²)'].mean():.3f} m/s²"
+
+# average period and average amplitide
+stats_text = f"Average Period: {results_a['Mean Period (s)'].mean():.3f} ± {results_a['Std Period (s)'].mean():.3f} s, "
+stats_text += f"Average Amplitude: {results_a['Mean Amplitude (m/s²)'].mean():.3f} ± {results_a['Std Amplitude (m/s²)'].mean():.3f} m/s²"
+```
+
+The average information of all part A trails: `{python} stats_text`
+
+### Statistical Analysis
+
+```{python}
+#| label: tbl-stats-a
+#| tbl-cap: "Statistical Analysis of Part A Trials"
+
+# Process all trials using pre-loaded data
+all_stats = []
+for i in range(1, 11):
+    # Get data from pre-loaded dictionary
+    data = data_a[i]
+    acc_y = data['accel_y'].values
+    
+    # Compute statistics
+    trial_stats = compute_trial_stats(acc_y)
+    trial_stats['Trial'] = i
+    all_stats.append(trial_stats)
+
+# Create DataFrame with all trials
+stats_df = pd.DataFrame(all_stats)
+
+# Calculate mean of all trials
+mean_stats = stats_df.drop('Trial', axis=1).mean()
+mean_stats_dict = mean_stats.to_dict()
+mean_stats_dict['Trial'] = 'Mean'
+
+# Add mean row to stats_df
+stats_df = pd.concat([stats_df, pd.DataFrame([mean_stats_dict])], ignore_index=True)
+
+## Format and display results
+display_df = stats_df.set_index('Trial').round(4)
+display_df.style.format({
+    'Mean (µ)': '{:.4f}',
+    'Variance (σ²)': '{:.4f}',
+    'Root Mean Square (RMS)': '{:.4f}',
+    'Skewness (γ₁)': '{:.4f}',
+    'Kurtosis (γ₂)': '{:.4f}'
+}).set_caption('Statistical Measures for Each Trial')
+
+stats_a = stats_df
+stats_a
+```
+
+### Period Estimation
+
+The period estimation is performed using peak detection method on the raw acceleration data. This method directly identifies local maxima in the signal to calculate the oscillation period.
+
+```{python}
+#| label: fig-period-analysis-a
+#| fig-cap: "Period Analysis using Peak Detection Method"
+
+# Initialize lists to store results
+all_periods = []
+peak_heights = []
+
+# Use pre-loaded data for visualization
+data = data_a[1]  # First trial
+time = data['time'].values
+acc_y = data['accel_y'].values
+
+# Calculate periods for the first trial
+trial_periods = np.diff(peak_a['peak_times'][0])
+mean_period = np.mean(trial_periods)
+std_period = np.std(trial_periods)
+
+# Create figure
+# plt.figure(figsize=(10, 5))
+plt.plot(time, acc_y, 'b-', alpha=0.5, label='Raw Acceleration')
+plt.plot(peak_a['peak_times'][0], peak_a['peak_values'][0], 'ro', markersize=8, label='Detected Peaks')
+plt.xlabel('Time (s)')
+plt.ylabel('Acceleration (m/s²)')
+plt.title('Peak Detection on Raw Acceleration Data')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/fig-period-analysis-a.png')
+plt.show()
+```
+
+```{python}
+#| label: tbl-amplitude-discussion-a
+#| tbl-cap: "Trial-by-trial results showing periods and amplitudes (Part A)"
+
+# Process all trials using pre-loaded data
+results = []
+for i in range(1, 11):
+    data = data_a[i]
+    time = data['time'].values
+    acc_y = data['accel_y'].values
+    
+    # Find peaks
+    peaks = peak_a['peak_times'][i-1]
+    if len(peaks) >= 2:
+        trial_periods = np.diff(peaks)
+        results.append({
+            'Trial': i,
+            'Mean Period (s)': np.mean(trial_periods),
+            'Std Period (s)': np.std(trial_periods)
+        })
+        
+
+# Create DataFrame with results
+results_df = pd.DataFrame(results)
+overall_mean = results_df['Mean Period (s)'].mean()
+overall_std = results_df['Std Period (s)'].mean()
+
+# Calculate theoretical period
+period_error = (overall_mean - theory_df['Theoretical Period (s)'][0])/theory_df['Theoretical Period (s)'][0] * 100
+
+# Store results for inline reference
+results_text_a = {
+    'measured_period': f"{overall_mean:.4f} ± {overall_std:.4f}",
+    'theoretical_period': f"{theory_df['Theoretical Period (s)'][0]:.4f}",
+    'error_percent': f"{period_error:.2f}"
+}
+
+# Create detailed results table
+results_a.style.format({
+    'Mean Amplitude (m/s²)': '{:.4f}',
+    'Std Amplitude (m/s²)': '{:.4f}',
+    'Mean Period (s)': '{:.4f}',
+    'Std Period (s)': '{:.4f}',
+    'Max Amplitude (m/s²)': '{:.4f}',
+    'Theoretical Period (s)': '{:.4f}',
+    'Period Error (%)': '{:.2f}'
+})
+
+```
+
+As we can see from @tbl-amplitude-discussion-a:
+Measured Period: `{python} results_text_a['measured_period']` s, 
+Theoretical Period: `{python} results_text_a['theoretical_period']` s, 
+Error: `{python} results_text_a['error_percent']`%.
+
+### Damping Analysis
+
+To analyze the damping characteristics of the pendulum, we extract peak amplitudes over time and fit them to the exponential decay model described in @eq-damped-pendulum.
+
+```{python}
+#| label: fig-damping-analysis
+#| fig-cap: "Peak amplitudes over time for all trials showing exponential decay"
+
+# Process all trials
+all_damping_ratios = []
+fit_results = []
+
+# Define the decay model
+def decay_model(t, A0, zeta, omega_n):
+    return A0 * np.exp(-zeta * omega_n * t)
+
+# Plot peaks for all trials
+colors = plt.cm.tab10(np.linspace(0, 1, 10))
+for i, color in enumerate(colors, 1):
+    # Load and process data
+    data = data_a[i]
+    time = data['time'].values
+    acc_y = data['accel_y'].values
+    
+    # Find peaks
+    peaks, properties = signal.find_peaks(acc_y, height=0.5, distance=50, prominence=0.5)
+    peak_times = time[peaks]
+    peak_values = acc_y[peaks]
+    
+    # Plot peaks
+    plt.plot(peak_times, peak_values, 'o-', color=color, alpha=0.5, 
+             label=f'Trial {i}', markersize=4)
+
+plt.xlabel('Time (s)')
+plt.ylabel('Peak Acceleration (m/s²)')
+plt.title('Peak Amplitudes Over Time - All Trials')
+plt.ylim(bottom=0)
+plt.grid(True)
+plt.legend(ncol=2)
+plt.tight_layout()
+plt.savefig('Figures/fig-damping-analysis.png')
+plt.show()
+```
+
+Using the first trial as example, We can use images to further reveal the characteristics of the data. @fig-simple-pendulum-analysis
+```{python}
+#| label: fig-simple-pendulum-analysis
+#| fig-cap: Period Variation and Amplitude Decay
+#| echo: false
+
+i=1
+df = data_a[i]
+t = df['time'].values
+x = df['accel_y'].values
+
+# 绘图
+fig, ((ax3, ax4)) = plt.subplots(1, 2, figsize=(9, 4))
+
+
+# Plot 3: Period Analysis
+periods = results_a['Mean Period (s)']
+ax3.plot(periods, 'g.-')
+ax3.axhline(y=np.mean(periods), color='r', linestyle='--', 
+            label=f'Mean: {np.mean(periods):.4f}s')
+ax3.set_title('Period Variation')
+ax3.set_xlabel('Peak Index')
+ax3.set_ylabel('Period (s)')
+ax3.set_ylim(1.1,1.2)
+ax3.grid(True)
+ax3.legend()
+
+# Plot 4: Peak Amplitude Decay
+if len(peak_a['peak_times'][i-1]) > 0:
+    ax4.plot(peak_a['peak_times'][i-1], peak_a['peak_values'][i-1], 'b.', label='Peak Amplitudes')
+    ax4.set_title('Amplitude Decay')
+    ax4.set_xlabel('Time (s)')
+    ax4.set_ylabel('Peak Amplitude')
+    ax4.grid(True)
+    ax4.legend()
+
+plt.tight_layout()
+plt.savefig('Figures/fig-simple-pendulum-analysis.png')
+plt.show()
+```
+
+Take `partA_trial01.csv` as example, plot fitting curve as follows: 
+
+```{python}
+#| label: fig-damping-trial01-example-a
+#| fig-cap: "Exponential Decay Fit - Trial 1"
+# Demonstrate fitting on trial 1
+# plt.figure(figsize=(8, 4))
+data = data_a[1]
+time = data['time'].values
+acc_y = data['accel_y'].values/0.1
+
+# Find peaks for fitting
+peaks, properties = signal.find_peaks(acc_y, height=0.5, distance=50, prominence=0.5)
+peak_times = time[peaks]
+peak_values = acc_y[peaks]
+
+# Fit decay model
+omega_n = 2 * np.pi / np.mean(np.diff(peak_times))  # Natural frequency
+try:
+    popt, pcov = curve_fit(lambda t, A0, zeta: decay_model(t, A0, zeta, omega_n), 
+                          peak_times, peak_values, 
+                          p0=[np.max(peak_values), 0.1])
+    A0_fit, zeta_fit = popt
+    
+    # Generate fitted curve
+    t_fit = np.linspace(0, np.max(time), 1000)
+    amplitude_fit = decay_model(t_fit, A0_fit, zeta_fit, omega_n)
+    
+    # Plot raw data and peaks
+    plt.plot(time, acc_y, 'b-', alpha=0.3, label='Raw Data')
+    plt.plot(peak_times, peak_values, 'ro', label='Peak Values')
+    plt.plot(t_fit, amplitude_fit, 'g--', label='Fitted Decay')
+    plt.plot(t_fit, -amplitude_fit, 'g--')  # Mirror the decay curve
+    
+    plt.xlabel('Time (s)')
+    plt.ylabel('Acceleration (m/s²)')
+    # plt.title('Exponential Decay Fit - Trial 1')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('Figures/fig-damping-trial01-example-a.png')
+    plt.show()
+except Exception as e:
+    print(f"Fitting failed: {e}")
+```
+
+```{python}
+#| label: tbl-damping-ratio-a
+#| tbl-cap: "Damping Ratio statistics of Part A"
+# Process all trials for damping ratio statistics
+results = []
+for i in range(1, 11):
+    data = load_trial_csv(f'Data/partA_trial{i:02d}.csv')
+    time = data['time'].values
+    acc_y = data['accel_y'].values
+    
+    peaks, properties = signal.find_peaks(acc_y, height=0.5, distance=50, prominence=0.5)
+    peak_times = time[peaks]
+    peak_values = acc_y[peaks]
+    
+    omega_n = 2 * np.pi / np.mean(np.diff(peak_times))
+    try:
+        popt, pcov = curve_fit(lambda t, A0, zeta: decay_model(t, A0, zeta, omega_n), 
+                              peak_times, peak_values, 
+                              p0=[np.max(peak_values), 0.1])
+        A0, zeta = popt
+        perr = np.sqrt(np.diag(pcov))
+        
+        results.append({
+            'Trial': i,
+            'Initial Amplitude (m/s²)': A0,
+            'Damping Ratio': zeta,
+            'Natural Frequency (rad/s)': omega_n,
+            'Fit Error': perr[1]  # Error in damping ratio
+        })
+    except:
+        continue
+
+# Create and display results table
+damping_a = pd.DataFrame(results)
+mean_zeta = damping_a['Damping Ratio'].mean()
+std_zeta = damping_a['Damping Ratio'].std()
+
+# Store for inline reference
+damping_text = f"{mean_zeta:.4f} ± {std_zeta:.4f}"
+
+# Display formatted results
+damping_tb = damping_a.style.format({
+    'Initial Amplitude (m/s²)': '{:.4f}',
+    'Damping Ratio': '{:.4f}',
+    'Natural Frequency (rad/s)': '{:.4f}',
+    'Fit Error': '{:.4f}'
+})
+
+
+
+print("Damping Ratio Analysis Results:")
+print(f"Mean Damping Ratio: {damping_text}")
+
+damping_tb
+```
+
+The damping analysis reveals:
+
+1. **Peak Evolution**: The figure shows the decay of peak amplitudes across all 10 trials, demonstrating consistent damping behavior.
+
+2. **Damping Ratio**: The mean damping ratio is ζ = `{python} damping_text`, indicating {
+    'moderate' if mean_zeta > 0.1 and mean_zeta < 0.7 
+    else 'light' if mean_zeta <= 0.1 
+    else 'heavy'
+} damping in the system.
+
+3. **Model Fit**: The exponential decay model provides a good fit to the experimental data, as shown in the example fit for Trial 1.
+
+
+### Discussion
+
+#### Amplitude and Period Analysis
+
+When analyzing pendulum motion using accelerometer data, we need to consider the relationship between measured acceleration and angular displacement. The y-direction acceleration is chosen for analysis because:
+
+1. It provides the most direct measure of the tangential acceleration of the pendulum
+2. It is less affected by the centripetal acceleration component
+3. The amplitude of y-acceleration is proportional to the angular displacement for small angles
+
+
+#### Experimental vs Theoretical Comparison
+
+```{python}
+#| label: fig-peak-amplitudes-part-a
+#| fig-cap: "Peak amplitudes over time showing the decay in oscillation magnitude"
+
+# Plot peak amplitudes using pre-loaded data
+data = data_a[1]  # First trial
+time = data['time'].values  # Convert to numpy array
+acc_y = data['accel_y'].values  # Convert to numpy array
+peaks, properties = signal.find_peaks(acc_y, height=0.5, distance=50, prominence=0.5)
+
+# plt.figure(figsize=(10, 6))
+plt.plot(time[peaks], acc_y[peaks], 'ro-', label='Peak Amplitudes')
+plt.plot(time, acc_y, 'b-', alpha=0.3, label='Acceleration Signal')
+plt.xlabel('Time (s)')
+plt.ylabel('Acceleration (m/s²)')
+plt.title('Peak Acceleration Amplitudes Over Time')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/fig-peak-amplitudes-part-a.png')
+plt.show()
+```
+
+The experimental results shown in @tbl-amplitude-discussion-a indicate that the measured periods are consistently close to the theoretical prediction, with small variations between trials. @fig-peak-amplitudes-part-a shows the decay in oscillation magnitude over time, which is expected due to damping effects.
+
+
+## Part B: Long Pendulum, Small Angles {#sec-part-b}
+
+**Data Overview**: The overview figure is shown as @fig-overview-b.
+```{python}
+#| label: fig-overview-b
+#| fig-cap: "Overview of pendulum motion showing y-direction acceleration for multiple trials. The first 15 seconds of data are shown for clarity."
+
+# Plot multiple trials
+# plt.figure(figsize=(9, 4))
+
+# Plot all trials from pre-loaded data
+for i in range(1, 11):
+    data = data_b[i]
+    plt.plot(data['time'], data['accel_y'], 
+             alpha=0.5, label=f'Trial {i}')
+
+plt.xlabel('Time (s)')
+plt.ylabel('Y-Acceleration (m/s²)')
+plt.title('Y-Direction Acceleration for Multiple Trials')
+plt.grid(True)
+plt.legend()
+plt.xlim(0, 15)  # Focus on first 15 seconds
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/fig-overview-b.png')
+plt.show()
+
+```
+
+
+
+### Statistical Analysis
+
+The statistical results of part B as shown in @tbl-stats-b 
+```{python}
+#| label: tbl-stats-b
+#| tbl-cap: "Statistical Analysis of Part B Trials"
+
+# Process all trials using pre-loaded data
+all_stats = []
+for i in range(1, 11):
+    # Get data from pre-loaded dictionary
+    data = data_b[i]
+    acc_y = data['accel_y'].values
+    
+    # Compute statistics
+    trial_stats = compute_trial_stats(acc_y)
+    trial_stats['Trial'] = i
+    all_stats.append(trial_stats)
+
+# Create DataFrame with all trials
+stats_df = pd.DataFrame(all_stats)
+
+# Calculate mean of all trials
+mean_stats = stats_df.drop('Trial', axis=1).mean()
+mean_stats_dict = mean_stats.to_dict()
+mean_stats_dict['Trial'] = 'Mean'
+
+# Add mean row to stats_df
+stats_df = pd.concat([stats_df, pd.DataFrame([mean_stats_dict])], ignore_index=True)
+
+# Format and display results
+display_df = stats_df.set_index('Trial').round(4)
+display_df.style.format({
+    'Mean (µ)': '{:.4f}',
+    'Variance (σ²)': '{:.4f}',
+    'Root Mean Square (RMS)': '{:.4f}',
+    'Skewness (γ₁)': '{:.4f}',
+    'Kurtosis (γ₂)': '{:.4f}'
+})
+
+stats_b = stats_df
+stats_b
+```
+
+### Period Estimation
+The figure of the part A is shown in the @fig-period-analysis-b (take the `partB_trial01.csv` as example)
+
+```{python}
+#| label: fig-period-analysis-b
+#| fig-cap: "Period Analysis using Peak Detection Method"
+
+# Initialize lists to store results
+all_periods = []
+peak_heights = []
+
+# Use pre-loaded data for visualization
+data = data_b[1]  # First trial
+time = data['time'].values
+acc_y = data['accel_y'].values
+
+# Calculate periods for the first trial
+trial_periods = np.diff(peak_b['peak_times'][0])
+mean_period = np.mean(trial_periods)
+std_period = np.std(trial_periods)
+
+# Create figure
+# plt.figure(figsize=(10, 5))
+plt.plot(time, acc_y, 'b-', alpha=0.5, label='Raw Acceleration')
+plt.plot(peak_b['peak_times'][0], peak_b['peak_values'][0], 'ro', markersize=8, label='Detected Peaks')
+plt.xlabel('Time (s)')
+plt.ylabel('Acceleration (m/s²)')
+plt.title('Peak Detection on Raw Acceleration Data')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/fig-period-analysis-b.png')
+plt.show()
+```
+
+The period and the standard deviation of all the part B is shown in the @tbl-amplitude-discussion-b.
+
+```{python}
+#| label: tbl-all-periods-part-b
+# Process all trials using pre-loaded data
+results = []
+for i in range(1, 11):
+    data = data_b[i]
+    time = data['time'].values
+    acc_y = data['accel_y'].values
+    
+    # Find peaks
+    peaks = peak_b['peak_times'][i-1]
+    if len(peaks) >= 2:
+        trial_periods = np.diff(peaks)
+        results.append({
+            'Trial': i,
+            'Mean Period (s)': np.mean(trial_periods),
+            'Std Period (s)': np.std(trial_periods)
+        })
+        
+# Create DataFrame with results
+results_df = pd.DataFrame(results)
+overall_mean = results_df['Mean Period (s)'].mean()
+overall_std = results_df['Std Period (s)'].mean()
+
+# Calculate theoretical period
+period_error = (overall_mean - theory_df['Theoretical Period (s)'][1])/theory_df['Theoretical Period (s)'][1] * 100
+
+# Store results for inline reference
+results_text_b = {
+    'measured_period': f"{overall_mean:.4f} ± {overall_std:.4f}",
+    'theoretical_period': f"{theory_df['Theoretical Period (s)'][1]:.4f}",
+    'error_percent': f"{period_error:.2f}"
+}
+
+```
+
+```{python}
+#| label: tbl-amplitude-discussion-b
+#| tbl-cap: "Trial-by-trial results showing periods and amplitudes (Part B)"
+
+# Create detailed results table
+results_b.style.format({
+    'Mean Amplitude (m/s²)': '{:.4f}',
+    'Std Amplitude (m/s²)': '{:.4f}',
+    'Mean Period (s)': '{:.4f}',
+    'Std Period (s)': '{:.4f}',
+    'Max Amplitude (m/s²)': '{:.4f}',
+    'Theoretical Period (s)': '{:.4f}',
+    'Period Error (%)': '{:.2f}'
+})
+
+```
+
+Mean Period of part B: `{python} results_text_b['measured_period']` s, 
+Theoretical Period: `{python} results_text_b['theoretical_period']` s, 
+Error: `{python} results_text_b['error_percent']`%
+
+### Damping Analysis
+
+Take `partB_trail01.csv` as example, We used @eq-damped-pendulum to fit the damping oscillation model well with . as shown in @fig-damping-trial01-example-b.
+
+```{python}
+#| label: fig-damping-trial01-example-b
+#| fig-cap: "Exponential Decay Fit - Trial 1"
+# Demonstrate fitting on trial 1
+# plt.figure(figsize=(10, 6))
+data = data_b[1]
+time = data['time'].values
+acc_y = data['accel_y'].values
+
+# Find peaks for fitting
+peaks, properties = signal.find_peaks(acc_y, height=0.5, distance=50, prominence=0.5)
+peak_times = time[peaks]
+peak_values = acc_y[peaks]
+
+# Fit decay model
+omega_n = 2 * np.pi / np.mean(np.diff(peak_times))  # Natural frequency
+try:
+    popt, pcov = curve_fit(lambda t, A0, zeta: decay_model(t, A0, zeta, omega_n), 
+                          peak_times, peak_values, 
+                          p0=[np.max(peak_values), 0.1])
+    A0_fit, zeta_fit = popt
+    
+    # Generate fitted curve
+    t_fit = np.linspace(0, np.max(time), 1000)
+    amplitude_fit = decay_model(t_fit, A0_fit, zeta_fit, omega_n)
+    
+    # Plot raw data and peaks
+    plt.plot(time, acc_y, 'b-', alpha=0.3, label='Raw Data')
+    plt.plot(peak_times, peak_values, 'ro', label='Peak Values')
+    plt.plot(t_fit, amplitude_fit, 'g--', label='Fitted Decay')
+    plt.plot(t_fit, -amplitude_fit, 'g--')  # Mirror the decay curve
+    
+    plt.xlabel('Time (s)')
+    plt.ylabel('Acceleration (m/s²)')
+    # plt.title('Exponential Decay Fit - Trial 1')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('Figures/fig-damping-trial01-example-b.png')
+    plt.show()
+except Exception as e:
+    print(f"Fitting failed: {e}")
+```
+
+The fitting parameters of ten experiments are shown in the @tbl-damping-ratio-b.
+
+```{python}
+#| label: tbl-damping-ratio-b
+#| tbl-cap: "Damping ratio statistics for part B"
+results = []
+for i in range(1, 11):
+    data = data_b[i]
+    time = data['time'].values
+    acc_y = data['accel_y'].values
+    
+    peaks, properties = signal.find_peaks(acc_y, height=0.5, distance=50, prominence=0.5)
+    peak_times = time[peaks]
+    peak_values = acc_y[peaks]
+    
+    omega_n = 2 * np.pi / np.mean(np.diff(peak_times))
+    try:
+        popt, pcov = curve_fit(lambda t, A0, zeta: decay_model(t, A0, zeta, omega_n), 
+                              peak_times, peak_values, 
+                              p0=[np.max(peak_values), 0.1])
+        A0, zeta = popt
+        perr = np.sqrt(np.diag(pcov))
+        
+        results.append({
+            'Trial': i,
+            'Initial Amplitude (m/s²)': A0,
+            'Damping Ratio': zeta,
+            'Natural Frequency (rad/s)': omega_n,
+            'Fit Error': perr[1]  # Error in damping ratio
+        })
+    except:
+        continue
+
+# Create and display results table
+damping_b = pd.DataFrame(results)
+mean_zeta = damping_b['Damping Ratio'].mean()
+std_zeta = damping_b['Damping Ratio'].std()
+
+# Store for inline reference
+damping_text = f"{mean_zeta:.4f} ± {std_zeta:.4f}"
+
+# Display formatted results
+damping_b.style.format({
+    'Initial Amplitude (m/s²)': '{:.4f}',
+    'Damping Ratio': '{:.4f}',
+    'Natural Frequency (rad/s)': '{:.4f}',
+    'Fit Error': '{:.4f}'
+})
+
+```
+
+Damping Ratio Analysis Results:
+Mean Damping Ratio: `{python} damping_text`
+
+From @tbl-damping-ratio-b, it can be seen that compared with partA, the damping ratio is bigger than part A, but the accelerator amplitude have significantly decreased.
+
+
+### Discussion
+
+The data comparison of part A and part B is shown in @tbl-stats-compare.
+
+```{python}
+#| label: tbl-stats-compare
+#| tbl-cap: "Comparison of part A & B"
+
+stats_a_label = stats_a.copy()
+stats_b_label = stats_b.copy()
+stats_a_label.iloc[-1, stats_a_label.columns.get_loc('Trial')] = 'partA'
+stats_b_label.iloc[-1, stats_b_label.columns.get_loc('Trial')] = 'partB'
+stats_compare = pd.concat([stats_a_label[-1:], stats_b_label[-1:]])
+stats_compare
+```
+
+As we can see from @tbl-stats-compare:
+
+1. **Part A (short pendulum):** Fluctuations are more intense (larger variance and RMS), and the signal carries higher energy.  
+2. **Part B (long pendulum):** Fluctuations are relatively mild, and the overall signal is smoother.  
+3. **Commonality:** Both distributions are symmetric (skewness ≈ 0) and have the same kurtosis (≈ 1.5), indicating that the two datasets share a similar shape, differing only in intensity.  
+
+## Part C: Nonlinear Regime Analysis {#sec-part-c}
+
+The overview of part C is shown as @fig-overview-c
+```{python}
+#| label: fig-overview-c
+#| fig-cap: "Data Overview of Part C"
+
+# Plot multiple trials
+# plt.figure(figsize=(9, 4))
+
+# Plot all trials from pre-loaded data
+for i in range(1, 11):
+    data = data_c[i]
+    plt.plot(data['time'], data['accel_y'], 
+             alpha=0.5, label=f'Trial {i}')
+
+plt.xlabel('Time (s)')
+plt.ylabel('Y-Acceleration (m/s²)')
+plt.title('Y-Direction Acceleration for Multiple Trials')
+plt.grid(True)
+plt.legend()
+plt.xlim(0, 15)  # Focus on first 15 seconds
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/fig-overview-c.png')
+plt.show()
+
+```
+
+From the @fig-overview-c, it can be seen that the data of Part B has a larger acceleration, and it is possible to observe that the peak has obvious confusion and interference from other motions.
+
+The statistical results of part B as shown in @tbl-stats-c 
+```{python}
+#| label: tbl-stats-c
+#| tbl-cap: "Statistical Analysis of Part C Trials"
+
+# Process all trials using pre-loaded data
+all_stats = []
+for i in range(1, 11):
+    # Get data from pre-loaded dictionary
+    data = data_c[i]
+    acc_y = data['accel_y'].values
+    
+    # Compute statistics
+    trial_stats = compute_trial_stats(acc_y)
+    trial_stats['Trial'] = i
+    all_stats.append(trial_stats)
+
+# Create DataFrame with all trials
+stats_df = pd.DataFrame(all_stats)
+
+# Calculate mean of all trials
+mean_stats = stats_df.drop('Trial', axis=1).mean()
+mean_stats_dict = mean_stats.to_dict()
+mean_stats_dict['Trial'] = 'Mean'
+
+# Add mean row to stats_df
+stats_df = pd.concat([stats_df, pd.DataFrame([mean_stats_dict])], ignore_index=True)
+
+# Format and display results
+display_df = stats_df.set_index('Trial').round(4)
+display_df.style.format({
+    'Mean (µ)': '{:.4f}',
+    'Variance (σ²)': '{:.4f}',
+    'Root Mean Square (RMS)': '{:.4f}',
+    'Skewness (γ₁)': '{:.4f}',
+    'Kurtosis (γ₂)': '{:.4f}'
+})
+
+stats_c = stats_df
+stats_c
+```
+
+
+### Period Analysis
+
+The same results are also reflected in @tbl-stats-c
+```{python}
+#| label: tbl-analysis-c
+#| tbl-cap: "Period Analysis of Part C"
+results_c
+```
+
+```{python}
+#| label: tbl-stats-compare-a-c
+#| tbl-cap: Comparison of part A & c
+stats_a_label = stats_a.copy()
+stats_c_label = stats_c.copy()
+stats_a_label.iloc[-1, stats_a_label.columns.get_loc('Trial')] = 'partA'
+stats_c_label.iloc[-1, stats_c_label.columns.get_loc('Trial')] = 'partC'
+stats_compare = pd.concat([stats_a_label[-1:], stats_c_label[-1:]])
+# stats_compare
+
+```
+
+```{python}
+#| label: tbl-all-periods-part-c
+# Process all trials using pre-loaded data
+results = []
+for i in range(1, 11):
+    data = data_c[i]
+    time = data['time'].values
+    acc_y = data['accel_y'].values
+    
+    # Find peaks
+    peaks = peak_c['peak_times'][i-1]
+    if len(peaks) >= 2:
+        trial_periods = np.diff(peaks)
+        results.append({
+            'Trial': i,
+            'Mean Period (s)': np.mean(trial_periods),
+            'Std Period (s)': np.std(trial_periods)
+        })
+        
+# Create DataFrame with results
+results_df = pd.DataFrame(results)
+overall_mean = results_df['Mean Period (s)'].mean()
+overall_std = results_df['Std Period (s)'].mean()
+
+# Calculate theoretical period
+period_error = (overall_mean - theory_df['Theoretical Period (s)'][2])/theory_df['Theoretical Period (s)'][2] * 100
+
+# Store results for inline reference
+results_text_c = {
+    'measured_period': f"{overall_mean:.4f} ± {overall_std:.4f}",
+    'theoretical_period': f"{theory_df['Theoretical Period (s)'][2]:.4f}",
+    'error_percent': f"{period_error:.2f}"
+}
+
+results_df_c = results_df
+
+```
+
+The mean period and theoretical period of the two sets of data are plotted as shown in @tbl-period-comapre-a-c.
+```{python}
+#| label: tbl-period-comapre-a-c
+#| tbl-cap: "Period comparison between A & C"
+comparison_df = pd.DataFrame({
+    'Metric': ['Measured Period (s)', 'Theoretical Period (s)', 'Error (%)'],
+    'Part A': [results_text_a['measured_period'], results_text_a['theoretical_period'], f"{results_text_a['error_percent']}"],
+    'Part C': [results_text_c['measured_period'], results_text_c['theoretical_period'], f"{results_text_c['error_percent']}"]
+})
+comparison_df.set_index('Metric')
+```
+
+```{python}
+#| label: fig-period-analysis-c
+#| fig-cap: "Period Analysis using Peak Detection Method"
+
+# Initialize lists to store results
+all_periods = []
+peak_heights = []
+
+# Use pre-loaded data for visualization
+data = data_c[9]  # First trial
+time = data['time'].values
+acc_y = data['accel_y'].values
+
+# Calculate periods for the first trial
+trial_periods = np.diff(peak_c['peak_times'][8])
+mean_period = np.mean(trial_periods)
+std_period = np.std(trial_periods)
+
+# Create figure
+# plt.figure(figsize=(10, 5))
+plt.plot(time, acc_y, 'b-', alpha=0.5, label='Raw Acceleration')
+plt.plot(peak_c['peak_times'][8], peak_c['peak_values'][8], 'ro', markersize=8, label='Detected Peaks')
+plt.xlabel('Time (s)')
+plt.ylabel('Acceleration (m/s²)')
+plt.title('Peak Detection on Raw Acceleration Data')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/fig-period-analysis-c.png')
+plt.show()
+```
+
+Period-Amplitude Analysis for Part A and Part C is shown as @fig-comparison-a-c
+```{python}
+#| label: fig-comparison-a-c
+#| fig-cap: Period-Amplitude Analysis for Part A and Part C
+plt.scatter(results_a['Mean Period (s)'][:], results_a['Mean Amplitude (m/s²)'][:], label='Part A', color='b')
+plt.scatter(results_c['Mean Period (s)'][:], results_c['Mean Amplitude (m/s²)'][:], label='Part C', color='r')
+plt.ylabel('Mean Amplitude (m/s²)')
+plt.xlabel('Mean Period (s)')
+plt.ylim(0,8)
+plt.xlim(0,2)
+plt.title('Period vs Amplitude')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('Figures/fig-comparison-a-c.png')
+plt.show()
+```
+
+As we can see from @fig-comparison-a-c, the impact of amplitude on the period is minimal, but it can also be clearly seen that the period of large amplitude will be slightly longer, and it is speculated that it is due to the influence of damping.
+
+### Damped Oscillation Analysis
+
+We analyze the damped motion of the pendulum using the model described in @eq-damped-pendulum. This section explores the damping characteristics and non-linear effects in the system.
+
+```{python}
+#| label: fig-damped-oscillation-output
+#| fig-cap: "Damped oscillation analysis showing experimental data and fitted model"
+
+def damped_oscillator(t, A, omega, phi, zeta):
+    return A * np.exp(-zeta * omega * t) * np.cos(omega * np.sqrt(1 - zeta**2) * t + phi)
+
+# Use pre-loaded Part C data
+data = data_c[1]  # First trial
+t = data['time']
+y = data['accel_y']  # Use y-direction acceleration for analysis
+
+# Fit damped oscillator model
+mask = t < 38  # Use first 30 seconds for fitting
+t_fit = t[mask]
+y_fit = y[mask]
+
+# Initial parameter estimates
+T = 2.0  # Approximate period from data
+omega_guess = 2 * np.pi / T
+p0 = [np.max(y_fit), omega_guess, 0, 0.1]  # Initial parameters
+
+# Perform the fit
+popt, _ = curve_fit(damped_oscillator, t_fit, y_fit, p0=p0)
+
+# Plot results
+plt.plot(t, y, 'b-', alpha=0.5, label='Experimental Data')
+plt.plot(t_fit, damped_oscillator(t_fit, *popt), 'r-', label='Fitted Model')
+plt.xlabel('Time (s)')
+plt.ylabel('Acceleration (m/s²)')
+plt.title('Damped Pendulum Motion (partC_trial01)')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/fig-damped-oscillation-output.png')
+plt.show()
+# Extract and print parameters
+A, omega, phi, zeta = popt
+print(f"Fitted parameters:")
+print(f"Amplitude: {A:.4f} m/s²")
+print(f"Angular frequency: {omega:.4f} rad/s")
+print(f"Phase: {phi:.4f} rad")
+print(f"Damping ratio: {zeta:.4f}")
+```
+
+From @fig-damped-oscillation-output, the results show that the model fits very well.
+
+### Comparison and Discussion
+
+As we can see from @tbl-period-comapre-a-c, Compared with Part A, Large-angle single pendulum motion has a larger acceleration amplitude, and the variance becomes significantly larger.
+
+The period is also smaller and the Angle has increased, perhaps due to the centrifugal force increases and the rope lengthens, and the linear speed increases, resulting in increased air resistance.
+
+
+**The key implications for anomaly detection algorithms** are:
+
+1. It must handle rare and imbalanced data.
+2. It need robustness to non-Gaussian distributions, noise, and concept drift.
+3. It should be scalable for large, high-dimensional datasets.
+4. It require interpretability to gain trust in critical applications.
+
+Ignoring skewness and kurtosis and assuming Gaussianity can lead to misclassifying normal rare events as anomalies or overlooking true anomalies hidden in heavy-tailed distributions.
+
+## Part D: Noise Discussion {#sec-conclusions}
+
+### Qualitative Noise Observation:
+
+#### Visually examine your time-series data for noise patterns
+
+The errors mainly come from **systematic errors, measurement errors, and human factors**. The observable sources can be summarized as follows:
+
+* **Measurement errors**: The angle measurement was relatively rough, and even the release angle varied each time. Length errors were also significant, as the string was measured without tension but stretched under load during the experiment.
+* **Systematic errors**: The chopstick only fixed one end, and during the experiment it was clearly observed that the chopstick oscillated up and down with the phone’s swing, producing noticeable acceleration interference. Moreover, the motion was difficult to keep strictly parallel to the *y*-direction, leading to significant initial acceleration components in the *x*- and *z*-directions, which caused waveform superposition.
+* **Human factors**: At larger angles, the phone slipped out, so an additional chopstick was added to secure it. This changed the system damping and introduced error. Since the experiment was conducted indoors, environmental effects were minimal.
+
+#### Identify any irregular fluctuations or unexpected signal features
+
+
+- The phone exhibited a **figure-eight motion** in the *x*-direction.
+- The chopstick showed an **up-and-down oscillation** during the experiment.
+- Since the chopstick was not circular but approximately square, the knot at the corners of the square produced **unexpected signals**.
+- The position of the accelerometer did not coincide with the phone’s center of mass, leading to **data skewness**, with the sensor data consistently showing negative skew.
+
+#### Comment on the smoothness of the recorded signals
+
+- The recorded signals were generally reliable, as the sensor had sufficiently high precision.
+- At the beginning and end of the measurement, the data was disturbed by external forces from human operation. These segments have been removed in this report; otherwise, they would have had a significant impact on the analysis and calculations.
+
+
+### Discussion
+
+What are the possible sources of noise in your smartphone measurements?
+
+Main ources of experimental uncertainty include:
+
+1. Measurement errors of the phone’s sensor
+2. Placement position of the phone
+3. Material of the string
+4. Material of the beam and its fixation method
+5. External forces and directional deviations caused by manual release
+
+**How might noise affect the accuracy of your period and damping estimates?**
+
+1. The phone’s components were not calibrated and may have undergone aging, leading to degraded performance and baseline drift.
+2. The phone was relatively large in size, and the sensor’s position did not coincide with the center of mass, resulting in skewed data.
+3. The fixing tools, such as yarn and chopsticks, were non-rigid and generated vibrations at their own natural frequencies, which affected the data.
+4. Since the chopsticks were not circular but angular, the pendulum collided with the edges during lateral swings, adding extra resistance.
+5. During the swinging motion, movement in the *x*-direction also affected the measurement direction, and additional external force could be inadvertently applied at the moment of release.
+
+
+In engineering practice, when precise data is required, multiple sensors can be combined by analyzing their frequency, phase space, and other distributions (as shown in @fig-requency-phase) to construct algorithms for correcting noise and errors. This report does not elaborate on that aspect.
+
+```{python}
+#| label: fig-requency-phase
+#| fig-cap: "Components of acceleration in x, y, and z directions for a single trial"
+
+# Plot acceleration components
+fig, (ax3, ax4) = plt.subplots(1, 2, figsize=(9, 4))
+
+# Calculate FFT for each component
+def plot_fft(data, fs):
+    n = len(data)
+    fft_result = np.fft.fft(data)
+    freqs = np.fft.fftfreq(n, 1/fs)
+    
+    # Only return positive frequencies
+    pos_mask = freqs >= 0
+    return freqs[pos_mask], np.abs(fft_result)[pos_mask]
+
+# Estimate sampling frequency
+fs = 1/np.mean(np.diff(data_b[1]['time']))
+
+# Calculate and plot FFT for each component
+component_cols = {'x': 'accel_x', 'y': 'accel_y', 'z': 'accel_z'}
+for component, col in component_cols.items():
+    freqs, amplitude = plot_fft(data_b[1][col], fs)
+    ax3.plot(freqs, amplitude, label=f'{component}-axis')
+
+ax3.set_xlabel('Frequency (Hz)')
+ax3.set_ylabel('Amplitude')
+ax3.set_title('Frequency Spectrum of Acceleration Components (partB_trial01)')
+ax3.grid(True)
+ax3.legend()
+ax3.set_xlim(0, 10)  # Focus on relevant frequency range
+
+# Phase space plot
+filtered_acc = data_b[1]['accel_y']
+dt = np.mean(np.diff(data_b[1]['time']))
+velocity = np.cumsum(filtered_acc) * dt
+ax4.plot(filtered_acc, velocity, 'b.', alpha=0.5, markersize=1)
+ax4.set_xlabel('Acceleration (m/s²)')
+ax4.set_ylabel('Velocity (m/s)')
+ax4.set_title('Phase Space (partB_trial01)')
+ax4.grid(True)
+
+plt.suptitle('Acceleration Analysis Components')
+plt.tight_layout()
+
+# Save figure
+plt.savefig('Figures/fig-requency-phase.png')
+plt.show()
+```
+
+# Conclusion
+
+From this experiment, the following conclusions can be drawn:
+
+1. The parameters of pendulum motion, such as period, mean, and skewness, were generally consistent with theoretical predictions, thereby verifying the correctness of the theoretical formulas and the relative reliability of the experiment.
+2. Pendulum motion with a longer arm and a small initial angle aligned more closely with theoretical data. As the angle increased or the arm length decreased, the experimental data deviated from the theoretical values.
+3. In theory, pendulums with equal arm lengths should have equal periods. However, in practice, the initial angle also influenced the period, producing a damped oscillation–like behavior, though not a purely damped oscillation.
+4. In this experiment, the materials and apparatus introduced considerable errors: the arm was non-rigid, the pivot was not fixed, and the sensor was not an ideal point. These factors generated significant noise and affected the data.
+5. For data preprocessing and peak detection, careful adjustment of observation parameters is required in the presence of noise to improve the robustness of the code.
