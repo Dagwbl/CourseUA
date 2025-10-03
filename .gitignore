@@ -3,3 +3,5 @@
 **/__pycache__/
 *.pyc
 .DS_Store
+
+/CIV E 789 LEC A3/Project Phase 1/bridge_vibration_data.json
